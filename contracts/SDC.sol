@@ -109,6 +109,7 @@ contract SDC {
             ledger.transferFrom(address(this),address_of_creditor,amountToBook); // auto_credit
         }
         emit Settled(block.timestamp);
+        return true;
     }
 
 }
