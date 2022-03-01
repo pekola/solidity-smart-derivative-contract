@@ -18,7 +18,7 @@ contract DigitalLedger is IERC20 {
     mapping(address => mapping(address => uint256)) private allowances; /*allowances for SDC*/
 
     modifier onlyTokenManager { // Modifier
-        require(msg.sender==tokenManagerAddress,"Not authorised");//check wether msg.sender is an SDCTradeManager
+        require(msg.sender==tokenManagerAddress,"Not authorised to mint token");//check wether msg.sender is an SDCTradeManager
         _;
     }
 
@@ -28,7 +28,8 @@ contract DigitalLedger is IERC20 {
         _;
     }
 
-    constructor(string memory name_, string memory symbol_) {
+    constructor(address _tokenManagerAddress, string memory name_, string memory symbol_) {
+        tokenManagerAddress = _tokenManagerAddress;
         name = name_;
         symbol = symbol_;
     }
@@ -59,7 +60,7 @@ contract DigitalLedger is IERC20 {
 
     function balanceOf(address account) external view override returns (uint256){
         require(account != address(0), "ERC20: mint to the zero address");
-        require(account == msg.sender, "Not authorised");
+        require(account == msg.sender, "Not authorised to view balance");
         return balances[account];
     }
 
