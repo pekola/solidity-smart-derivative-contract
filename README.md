@@ -1,8 +1,8 @@
-# Tokenised SDC Project
+# SDC Project
 
 ## Description
 This little project aims to implement SDC settlement logic in a very lean way focussing solely on a integrative solidity based implementation as much as possible.
-In the first version the project contains four contracts:
+In the first version the project contains four contracts.
 
 ## Getting Started
 Sample Unit Testing in solidity will be provided soon.

@@ -78,6 +78,7 @@ contract SDC{
     }
 
     function confirmTrade(string memory trade_id) external onlyCounterparty  returns(bool){ 
+        require(refTradeSpecs[trade_id].inceptionAddress != msg.sender, "Trade cannot be confirmed by inception address");
         refTradeSpecs[trade_id].trade_timestamp = block.timestamp;
         emit TradeConfirmed(trade_id,block.timestamp);
         DigitalLedger ledger =  DigitalLedger(ledgerAddress);
