@@ -3,7 +3,7 @@ pragma solidity ^0.8.0;
 
 import "./DigitalLedger.sol";
 
-contract SDC {
+contract SDC{
 
     enum TradeStatus{ INCEPTED, CONFIRMED, LIVE, TERMINATED }
 
@@ -44,15 +44,18 @@ contract SDC {
       id = _id;
       counterparty1Address = _counterparty1Adress;
       counterparty2Address = _counterparty2Adress;   
-      ledgerAddress = _ledgerAddress;
+      ledgerAddress = 
+      _ledgerAddress;
     }
+
+
 
     /* Modifiers */
     modifier onlyCounterparty { 
         require(msg.sender == counterparty1Address || msg.sender == counterparty2Address); _;
     }
 
-    function setMarginBufferAmount (uint amount) onlyCounterparty public returns(bool) {
+    function setMarginBufferAmount (uint amount) onlyCounterparty external returns(bool) {
         marginBufferAmounts[msg.sender] = amount;
         DigitalLedger ledger =  DigitalLedger(ledgerAddress);
         ledger.increaseAllowance(address(this),amount);
