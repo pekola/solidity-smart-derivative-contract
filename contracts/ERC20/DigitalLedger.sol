@@ -3,7 +3,6 @@ pragma solidity ^0.8.0;
 
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 
-import "./SDCInceptor.sol";
 
 contract DigitalLedger is IERC20 {
 
@@ -12,18 +11,12 @@ contract DigitalLedger is IERC20 {
     string private symbol;
 
     address tokenManagerAddress;
-    address sdcManagerAddress;
 
     mapping(address => uint256) private balances;
     mapping(address => mapping(address => uint256)) private allowances; /*allowances for SDC*/
 
     modifier onlyTokenManager { // Modifier
-        require(msg.sender==tokenManagerAddress,"Not authorised to mint token");//check wether msg.sender is an SDCTradeManager
-        _;
-    }
-
-    modifier onlySDC { // Modifier
-//        require(SDCManager(sdcManagerAddress).exists(msg.sender),"No registered active sdc address!");//check wether msg.sender is an SDCTradeManager
+        require(msg.sender==tokenManagerAddress,"Not authorised to mint SDCERC20 token");
         _;
     }
 

@@ -3,7 +3,9 @@ pragma solidity ^0.8.0;
 
 import "./DigitalLedger.sol";
 
-contract SDC{
+contract SDC {
+    uint constant MARGIN_BUFFER = 1;
+    uint constant TERMINATION_FEE = 2;
 
     enum TradeStatus{ INCEPTED, CONFIRMED, LIVE, TERMINATED }
 
@@ -27,21 +29,17 @@ contract SDC{
     address private counterparty2Address;
     address private ledgerAddress;
 
-    uint    settlement_timestamp;
-
     mapping(string => RefTradeSpec) refTradeSpecs;
 
-    mapping(address => uint) private marginBufferAmounts;
-    mapping(address => uint) private terminationFeeAmounts;
-
+    mapping(uint  => mapping(address => uint) ) private sdcBalances;
   
     constructor(string memory _id, 
                 address _counterparty1Adress, 
                 address _counterparty2Adress, 
-                address _ledgerAddress)  {
+                address _ledgerAddress) {
       id = _id;
       counterparty1Address = _counterparty1Adress;
-      counterparty2Address = _counterparty2Adress;   
+      counterparty2Address = _counterparty2Adress;  
       ledgerAddress = _ledgerAddress;
     }
 
@@ -55,17 +53,15 @@ contract SDC{
     }
 
     function setMarginBufferAmount (uint amount) external onlyCounterparty returns(bool) {
-        marginBufferAmounts[msg.sender] = amount;
-        DigitalLedger ledger =  DigitalLedger(ledgerAddress);
-        ledger.increaseAllowance(msg.sender,address(this),amount);
+        sdcBalances[MARGIN_BUFFER][msg.sender] = amount;
+        DigitalLedger(ledgerAddress).increaseAllowance(msg.sender,address(this),amount);
         return true;
     }
 
 
     function setTerminationFeeAmount (uint amount) external onlyCounterparty returns(bool) {
-        terminationFeeAmounts[msg.sender] = amount;
-        DigitalLedger ledger =  DigitalLedger(ledgerAddress);
-        ledger.increaseAllowance(msg.sender,address(this),amount);
+        sdcBalances[TERMINATION_FEE][msg.sender] = amount;
+        DigitalLedger(ledgerAddress).increaseAllowance(msg.sender,address(this),amount);
         return true;
     }
 
@@ -81,9 +77,8 @@ contract SDC{
         require(refTradeSpecs[trade_id].inceptionAddress != msg.sender, "Trade cannot be confirmed by inception address");
         refTradeSpecs[trade_id].trade_timestamp = block.timestamp;
         emit TradeConfirmed(trade_id,block.timestamp);
-        DigitalLedger ledger =  DigitalLedger(ledgerAddress);
-        ledger.transferFrom(counterparty1Address,address(this),marginBufferAmounts[counterparty1Address]+terminationFeeAmounts[counterparty1Address]);
-        ledger.transferFrom(counterparty2Address,address(this),marginBufferAmounts[counterparty2Address]+terminationFeeAmounts[counterparty2Address]);
+        DigitalLedger(ledgerAddress).transferFrom(counterparty1Address,address(this),sdcBalances[MARGIN_BUFFER][counterparty1Address]+sdcBalances[TERMINATION_FEE][counterparty1Address]);
+        DigitalLedger(ledgerAddress).transferFrom(counterparty2Address,address(this),sdcBalances[MARGIN_BUFFER][counterparty2Address]+sdcBalances[TERMINATION_FEE][counterparty2Address]);
         emit TradeActive(trade_id,block.timestamp);
         return true;
     }
@@ -96,15 +91,14 @@ contract SDC{
         require(settlement_amount > 0, "Settlement amount should be positive");
         require(address_of_creditor == counterparty1Address || address_of_creditor == counterparty2Address, "Creditor Address should be either CP1 oder CP");
         address address_of_debitor = address_of_creditor == counterparty1Address ? counterparty2Address : counterparty1Address;
-        if ( marginBufferAmounts[address_of_debitor] >= settlement_amount ){
+        if ( sdcBalances[MARGIN_BUFFER][address_of_debitor] >= settlement_amount ){
             _performTermination();
             emit SDCTerminated(block.timestamp);
         }
         else{
-            DigitalLedger ledger =  DigitalLedger(ledgerAddress);
-            uint256 amountToTransfer = settlement_amount - marginBufferAmounts[address_of_debitor];
-            ledger.transferFrom(address_of_debitor,address(this),amountToTransfer);     // autodebit
-            ledger.transferFrom(address(this),address_of_creditor,amountToTransfer);    // auto_credit
+            uint256 amountToTransfer = settlement_amount - sdcBalances[MARGIN_BUFFER][address_of_debitor];
+            DigitalLedger(ledgerAddress).transferFrom(address_of_debitor,address(this),amountToTransfer);     // autodebit
+            DigitalLedger(ledgerAddress).transferFrom(address(this),address_of_creditor,amountToTransfer);    // auto_credit
             emit SDCSettlementSuccessful(block.timestamp);
         }
         
@@ -113,6 +107,12 @@ contract SDC{
 
     function _performTermination() private pure returns(bool){
         return true;
+    }
+
+    function margin_check(uint256 amount, address debit_adress) internal view returns(bool){
+        require(sdcBalances[MARGIN_BUFFER][debit_adress] >= amount, "");
+        return true;
+
     }
 
 }
