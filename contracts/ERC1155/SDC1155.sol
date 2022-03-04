@@ -8,50 +8,58 @@ import "@openzeppelin/contracts/token/ERC1155/IERC1155.sol";
 
 contract SDC1155 is IERC1155 {
 
+    // const int ids for several token - i.e. account balance - types
     uint constant BUFFER = 1;
     uint constant MARGIN = 2;
     uint constant TERMINATIONFEE = 3;
     uint constant VALUATIONFEE = 4;
 
-    enum TradeStatus{ INCEPTED, CONFIRMED, LIVE, TERMINATED }
+    enum TradeStatus{ INCEPTED, CONFIRMED, ACTIVE, TERMINATION_CONFIRMED, TERMINATED }
 
     string private sdc_id;
+    // SDC need three addresses as token minting and burning is executed by a central authority
     address private counterparty1Address;
     address private counterparty2Address;
     address private tokenManagerAddress;
 
+    // Specification of reference trades
     struct RefTradeSpec{
         uint256 trade_timestamp;
         string  fpml_data;
-        TradeStatus tradeStatus;
         address adressFixedRatePayer;   // Convention is PV = Fix - Float
-        address inceptionAddress;
-        uint256 marginBuffer;
+        uint256 marginBuffer;           // Currently buffers and termination fee are assumed to be symmetric
         uint256 terminationFee;
+        TradeStatus tradeStatus;
+        address statusRequestAddress;   // this is the adress which has initiated a certain state change which needs to be confirmed - i.e. INCEPTION or TERMINATION
     }
 
+    // Holds all reference trades
     mapping(string => RefTradeSpec) refTradeSpecs;
 
+    // Multi-Token Balance and operator approval map
     mapping(uint256 => mapping(address => uint256)) private balances;
     mapping(address => mapping(address => bool))    private operatorApprovals;
 
-    event TradeIncepted(string id, uint256 timestamp);
-    event TradeConfirmed(string id, uint256 timestamp);
+    // Trade Events
+    event TradeIncepted(address fromAddress, string id, uint256 timestamp);
+    event TradeConfirmed(address fromAddress, string id, uint256 timestamp);
     event TradeActive(string id, uint256 timestamp);
-    event SDCTerminated(uint256 timestamp);
-    event SDCSettlementSuccessful(uint256 timestamp);
+    event TradeTerminated(uint256 timestamp);
+    event TradeSettlementSuccessful(uint256 timestamp);
+    event ValuationRequest(uint256 timestamp);
+    event TerminationRequested(address fromAddress, string trade_id, uint256 timestamp);
+    event TerminationConfirmed(address fromAddress, string trade_id, uint256 timestamp);
 
-     /* Modifiers */
+    // Modifiers
     modifier onlyCounterparty { 
         require(msg.sender == counterparty1Address || msg.sender == counterparty2Address, "Not authorised"); _;
     }
 
-    modifier onlyTokenManager { // Modifier
+    modifier onlyTokenManager {
         require(msg.sender == tokenManagerAddress,"Not authorised");
         _;
     }
     
-
     constructor(string memory _sdc_id, 
                 address _counterparty1Adress, 
                 address _counterparty2Adress, 
@@ -61,71 +69,114 @@ contract SDC1155 is IERC1155 {
       counterparty2Address  = _counterparty2Adress;  
       tokenManagerAddress   = _tokenManagerAddress;
     }
-
     
+    /*@notice: External Function to Incept a Trade with FPML data and margin and buffer amounts */
     function inceptTrade(string memory fpml_data, address fixPayerPartyAddress, uint256 terminationFee, uint256 marginBuffer) external onlyCounterparty returns(string memory){ 
         uint256 timestamp = block.timestamp;
         string memory trade_id = string(abi.encodePacked("trade_ref_",timestamp));
-        refTradeSpecs[trade_id] = RefTradeSpec(timestamp,fpml_data,TradeStatus.INCEPTED,fixPayerPartyAddress,msg.sender,terminationFee,marginBuffer);
-        emit TradeIncepted(trade_id,timestamp);
+        refTradeSpecs[trade_id] = RefTradeSpec(timestamp,fpml_data,fixPayerPartyAddress,terminationFee,marginBuffer,TradeStatus.INCEPTED,msg.sender);
+        emit TradeIncepted(msg.sender,trade_id,timestamp);
         return trade_id;
     }
 
+    /*@notice: External Function to Confirm an incepted trade, triggers initial transfer of margin and termination fee */
     function confirmTrade(string memory trade_id) external onlyCounterparty  returns(bool){ 
-        require(refTradeSpecs[trade_id].inceptionAddress != msg.sender, "Trade cannot be confirmed by inception address");
+        require(refTradeSpecs[trade_id].statusRequestAddress != msg.sender, "Trade-Inception cannot be confirmed by same address which has requested inception");
         refTradeSpecs[trade_id].trade_timestamp = block.timestamp;
-        emit TradeConfirmed(trade_id,block.timestamp);
-        _transfer(counterparty1Address, address(this), BUFFER, MARGIN, refTradeSpecs[trade_id].marginBuffer); 
-        _transfer(counterparty1Address, address(this), BUFFER, TERMINATIONFEE, refTradeSpecs[trade_id].terminationFee); 
-        _transfer(counterparty2Address, address(this), BUFFER, MARGIN, refTradeSpecs[trade_id].marginBuffer); 
-        _transfer(counterparty2Address, address(this), BUFFER, TERMINATIONFEE, refTradeSpecs[trade_id].terminationFee); 
+        emit TradeConfirmed(msg.sender,trade_id,block.timestamp);
+        _performTransfer(counterparty1Address, address(this), BUFFER, MARGIN, refTradeSpecs[trade_id].marginBuffer); 
+        _performTransfer(counterparty1Address, address(this), BUFFER, TERMINATIONFEE, refTradeSpecs[trade_id].terminationFee); 
+        _performTransfer(counterparty2Address, address(this), BUFFER, MARGIN, refTradeSpecs[trade_id].marginBuffer); 
+        _performTransfer(counterparty2Address, address(this), BUFFER, TERMINATIONFEE, refTradeSpecs[trade_id].terminationFee); 
+        refTradeSpecs[trade_id].tradeStatus = TradeStatus.ACTIVE;
         emit TradeActive(trade_id,block.timestamp);
         return true;
     }
 
+    /*@notice: SDC - External Function to trigger a settlement */
+    function settle() external returns(bool){ 
+        emit ValuationRequest(block.timestamp);
+        //@todo: wait with booking until Valuation Service delivers results for trade specs 
+        return true;
+    }
 
+    /*@notice: SDC - External function to request an early termination */
+    function requestTradeTermination(string memory trade_id) external onlyCounterparty returns(bool){ 
+        emit TerminationRequested(msg.sender,trade_id, block.timestamp);
+        return true;
+    }
+
+    /*@notice: SDC - External function to confirm an early termination: Termination will be executed after next settlement */
+    function confirmTradeTermination(string memory trade_id) external onlyCounterparty returns(bool){ 
+        require(refTradeSpecs[trade_id].statusRequestAddress != msg.sender, "Trade-Termination cannot be confirmed by same address which has requested termination");
+        emit TerminationConfirmed(msg.sender,trade_id, block.timestamp);
+        refTradeSpecs[trade_id].tradeStatus = TradeStatus.TERMINATION_CONFIRMED;
+        return true;
+    }
     
-    function _performSettlement(string memory trade_id, uint256 settlement_amount, address address_of_creditor ) private returns(bool){
+     /*@notice: SDC - External function to return fpml array  */
+    function getRefTradeData() external pure  returns (string[] memory){
+        string[] memory fpmlArray;
+        return fpmlArray;
+    }
+
+     /*@notice: SDC - Internal function to perform a settlement transfer for specific trade id */
+    function _performSettlementTransfer(string memory trade_id, uint256 settlement_amount, address address_of_creditor ) private returns(bool){
         require(settlement_amount > 0, "Settlement amount should be positive");
         require(address_of_creditor == counterparty1Address || address_of_creditor == counterparty2Address, "Creditor Address should be either CP1 oder CP");
         address address_of_debitor = address_of_creditor == counterparty1Address ? counterparty2Address : counterparty1Address;
         if ( _settlementCheck(trade_id,settlement_amount) ){
             uint256 amountToTransfer = settlement_amount - refTradeSpecs[trade_id].marginBuffer;
-            _transfer(address_of_debitor, address(this), BUFFER, MARGIN, amountToTransfer); // autodebit
-            _transfer(address(this), address_of_creditor, MARGIN, BUFFER, amountToTransfer); // autocredit
-            emit SDCSettlementSuccessful(block.timestamp);
+            _performTransfer(address_of_debitor, address(this), BUFFER, MARGIN, amountToTransfer); // autodebit
+            _performTransfer(address(this), address_of_creditor, MARGIN, BUFFER, amountToTransfer); // autocredit
+            emit TradeSettlementSuccessful(block.timestamp);
         }
         else{
-            _performTermination();
-            emit SDCTerminated(block.timestamp);
+            _performTermination(trade_id);
+            emit TradeTerminated(block.timestamp);
         }
         
         return true;
     }
 
-    function _performTermination() private pure returns(bool){
+    /*@notice: SDC - Internal function to perform termination */
+    function _performTermination(string memory trade_id) private pure returns(bool){
         return true;
     }
 
-    function _marginCheck() private pure returns(bool){
-
+    /*@notice: SDC - Check Margin */
+    function _marginCheck(string memory trade_id) private pure returns(bool){
+        return true;
     }
 
-
+    /*@notice: SDC - Check Settlement */
     function _settlementCheck(string memory trade_id, uint256 amount) private view returns(bool){
         if ( refTradeSpecs[trade_id].marginBuffer <= amount) return true;
         else return false;
     }
 
+    /* @notice: SDC - Mints Buffer Token - Only be called from Token Manager - i.e. Kontoführer*/
+    function mintBufferToken(address to, uint256 amount) external virtual onlyTokenManager {
+        require(to != address(0), "mintBuffer: mint to the zero address");
+        balances[BUFFER][to] += amount;
+        emit TransferSingle(msg.sender, msg.sender, to, BUFFER, amount);
+    }
 
-    /*@notice Get the balance of an account's Tokens. */
+    /* @notice: SDC - Burns Buffer Token - Only be called from Token Manager - i.e. Kontoführer*/
+    function burnBufferToken(address from, uint256 amount) external virtual onlyTokenManager {
+        require(from != address(0), "burnBuffer: burn from the zero address");
+        balances[BUFFER][from] -= amount;
+        emit TransferSingle(msg.sender,from, msg.sender, BUFFER, amount);
+    }
+   
+    /*@notice: IERC1155 - Get the balance of an account's Tokens. */
     function balanceOf(address account, uint256 _id)  external view override returns (uint256){
         require(_id <= 4, "balanceOf: only four token types defined!");
         require(account != address(0x0), "balanceOf: balance query for the zero address");
         return balances[_id][account];
     }
 
-    /*@notice Get the balance of multiple account/token pairs*/
+    /*@notice: IERC1155 - Get the balance of multiple account/token pairs*/
     function balanceOfBatch(address[] memory accounts, uint256[] memory ids) external view override returns (uint256[] memory){
         require(accounts.length == ids.length, "balanceOfBatch: accounts and ids length mismatch");
         uint256[] memory batchBalances = new uint256[](accounts.length);
@@ -135,32 +186,22 @@ contract SDC1155 is IERC1155 {
         return batchBalances;
     }
 
-    /*  @notice Transfers `_value` amount of an `_id` from the `_from` address to the `_to` address specified (with safety call). */
+    /*  @notice: IERC1155 - Transfers `_value` amount of an `_id` from the `_from` address to the `_to` address specified (with safety call). */
     function safeTransferFrom(address from, address to, uint256 id, uint256 amount, bytes memory data) external override{
-        _transfer(from,to,id,id,amount);
-        emit TransferSingle(msg.sender, from, to, id, amount);
+        require(msg.sender==address(this),"Not authorised");  // cannot be called from other external address
+        _performTransfer(from,to,id,id,amount);
+
     }
 
-    /* @notice Transfers `_values` amount(s) of `_ids` from the `_from` address to the `_to` address specified (with safety call). */
+    /* @notice: IERC1155 - Transfers `_values` amount(s) of `_ids` from the `_from` address to the `_to` address specified (with safety call). */
     function safeBatchTransferFrom(address from, address to, uint256[] calldata ids, uint256[] calldata amounts, bytes memory data) external override{
-        _batchTransfer(from,to,ids,ids,amounts);
-        emit TransferBatch(msg.sender, from, to, ids, amounts);
+        require(msg.sender==address(this),"Not authorised");  // cannot be called from other external address
+        _performBatchTransfer(from,to,ids,ids,amounts);
+
     }
 
-    function mintBufferToken(address to, uint256 amount) external virtual onlyTokenManager {
-        require(to != address(0), "mintBuffer: mint to the zero address");
-        balances[BUFFER][to] += amount;
-        emit TransferSingle(msg.sender, msg.sender, to, BUFFER, amount);
-    }
-
-    function burnBufferToken(address from, uint256 amount) external virtual onlyTokenManager {
-        require(from != address(0), "burnBuffer: burn from the zero address");
-        balances[BUFFER][from] -= amount;
-        emit TransferSingle(msg.sender,from, msg.sender, BUFFER, amount);
-    }
-   
-
-    /*@notice Enable or disable approval for a third party ("operator") to manage all of the caller's tokens.*/
+    
+    /*@notice: IERC1155 - Enable or disable approval for a third party ("operator") to manage all of the caller's tokens.*/
     function setApprovalForAll(address operator, bool isApproved) external override {
         require(operator != address(0x0), "setApprovalForAll: operator is zero address");
         address owner = msg.sender;
@@ -168,14 +209,15 @@ contract SDC1155 is IERC1155 {
         emit ApprovalForAll(owner, operator, isApproved);
     }
 
-    /*@notice Queries the approval status of an operator for a given owner.*/
+    /*@notice: IERC1155 - Queries the approval status of an operator for a given owner.*/
     function isApprovedForAll(address owner, address operator) external view override returns (bool)  {
         require(owner != address(0x0), "isApprovedForAll: owner is zero address");
         require(operator != address(0x0), "isApprovedForAll: operator is zero address");
         return operatorApprovals[owner][operator];
     }
 
-    function _transfer(address from, address to, uint256 id_from, uint256 id_to, uint256 amount) internal {
+    /*@notice: Internal function to perform a cross token transfer */
+    function _performTransfer(address from, address to, uint256 id_from, uint256 id_to, uint256 amount) internal {
         require(to != address(0x0), "_transfer: transfer to the zero address");
         uint256 fromBalance = balances[id_from][from];
         require(fromBalance >= amount, "_transfer: insufficient balance for transfer");
@@ -183,8 +225,8 @@ contract SDC1155 is IERC1155 {
         balances[id_to][to] += amount;
     }
 
-    
-    function _batchTransfer(address from, address to, uint256[] memory ids_from, uint256[] memory ids_to, uint256[] memory amounts) internal {
+    /*@notice: Internal function to perform a cross token batch transfer */
+    function _performBatchTransfer(address from, address to, uint256[] memory ids_from, uint256[] memory ids_to, uint256[] memory amounts) internal {
         require(ids_from.length == amounts.length, "_batchCrossTransfer: ids and amounts length mismatch");
         require(ids_from.length == ids_to.length, "_batchCrossTransfer: ids_to and ids_from length mismatch");
         require(to != address(0), "safeBatchTransferFrom: transfer to the zero address");
@@ -203,6 +245,7 @@ contract SDC1155 is IERC1155 {
     }
 
     
+    /*@notice: Some support interface implementation..to be explored further*/
     function supportsInterface(bytes4 interfaceId) public view virtual override returns (bool) {
         return interfaceId == type(IERC1155).interfaceId;
     }
