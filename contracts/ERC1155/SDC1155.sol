@@ -9,10 +9,10 @@ import "@openzeppelin/contracts/token/ERC1155/IERC1155.sol";
 contract SDC1155 is IERC1155 {
 
     // const int ids for several token - i.e. account balance - types
-    uint constant BUFFER = 1;
-    uint constant MARGIN = 2;
-    uint constant TERMINATIONFEE = 3;
-    uint constant VALUATIONFEE = 4;
+    uint constant BUFFER            = 1;
+    uint constant MARGIN            = 2;
+    uint constant TERMINATIONFEE    = 3;
+    uint constant VALUATIONFEE      = 4;
 
     enum TradeStatus{ INCEPTED, CONFIRMED, ACTIVE, TERMINATION_CONFIRMED, TERMINATED }
 
@@ -26,7 +26,7 @@ contract SDC1155 is IERC1155 {
     struct RefTradeSpec{
         uint256 trade_timestamp;
         string  fpml_data;
-        address adressFixedRatePayer;   // Convention is PV = Fix - Float
+        address addressPayerSwap;       // Convention: PV calculation as seen from fixed rate payer = Fix - Float
         uint256 marginBuffer;           // Currently buffers and termination fee are assumed to be symmetric
         uint256 terminationFee;
         TradeStatus tradeStatus;
@@ -36,6 +36,10 @@ contract SDC1155 is IERC1155 {
     // Holds all reference trades
     mapping(string => RefTradeSpec) refTradeSpecs;
 
+    // Holds all past valuations: timestamp -> map(trade_id,amount)
+    uint256[] valuationTimeStamps;
+    mapping(uint256 => mapping(string => uint256)) private pastSettlementAmounts;
+
     // Multi-Token Balance and operator approval map
     mapping(uint256 => mapping(address => uint256)) private balances;
     mapping(address => mapping(address => bool))    private operatorApprovals;
@@ -44,8 +48,8 @@ contract SDC1155 is IERC1155 {
     event TradeIncepted(address fromAddress, string id, uint256 timestamp);
     event TradeConfirmed(address fromAddress, string id, uint256 timestamp);
     event TradeActive(string id, uint256 timestamp);
-    event TradeTerminated(uint256 timestamp);
-    event TradeSettlementSuccessful(uint256 timestamp);
+    event TradeTerminated(string id, address causingParty, uint256 timestamp);
+    event TradeSettlementSuccessful(string id, uint256 timestamp);
     event ValuationRequest(uint256 timestamp);
     event TerminationRequested(address fromAddress, string trade_id, uint256 timestamp);
     event TerminationConfirmed(address fromAddress, string trade_id, uint256 timestamp);
@@ -93,10 +97,34 @@ contract SDC1155 is IERC1155 {
         return true;
     }
 
-    /*@notice: SDC - External Function to trigger a settlement */
-    function settle() external returns(bool){ 
+    /*@notice: SDC - External Function to trigger a settlement with already know settlement amounts called by e.g. an external oracle service */
+    function settle(string[] memory trade_ids, uint[] memory settlementAmounts ) public pure returns(bool){ 
+        uint position;
+        address creditor_address;
+        for (uint i=0; i< trade_ids.length; i++){
+            if (settlementAmounts[i] < 0 ){ // This case Payer Swap has decreased in value
+                creditor_address = refTradeSpecs[trade_ids[0]].addressPayerSwap == counterparty1Address ? counterparty2Address : counterparty1Address;
+                position =  -1;
+            }
+            else{
+                creditor_address = refTradeSpecs[trade_ids[0]].addressPayerSwap;
+                position = 1;
+            }
+            _performSettlementTransfer(trade_ids[i], position*settlementAmounts[i], creditor_address);
+        }
+        
+        return true;
+    }
+
+    /*@notice: SDC - External Function to trigger a settlement for all active trades only triggered by a counterparty */
+    function settle() external onlyCounterparty returns(bool){ 
         emit ValuationRequest(block.timestamp);
-        //@todo: wait with booking until Valuation Service delivers results for trade specs 
+        //Wait as long as the block time is after the latest valuation timestamp i.e. a valuation has taken place
+        while (block.timestamp < valuationTimeStamps[valuationTimeStamps.length-1]){
+        }
+        // uint256 latestTimeStamp = valuationTimeStamps[valuationTimeStamps.length-1];
+        // call settle for 
+
         return true;
     }
 
@@ -114,10 +142,17 @@ contract SDC1155 is IERC1155 {
         return true;
     }
     
-     /*@notice: SDC - External function to return fpml array  */
+     /*@notice: SDC - Communication with Oracle - External function to return fpml array  */
     function getRefTradeData() external pure  returns (string[] memory){
         string[] memory fpmlArray;
         return fpmlArray;
+    }
+
+    /*@notice: SDC - Communication with Oracle - External function to return fpml array  */
+    function setSettlementAmounts(string[] calldata trade_ids, uint256[] calldata amounts, uint256 timestamp) external {
+        for (uint i=0; i< trade_ids.length; i++)
+            settlementAmounts[timestamp][trade_ids[i] ] = amounts[i];
+        valuationTimeStamps.push(timestamp);
     }
 
      /*@notice: SDC - Internal function to perform a settlement transfer for specific trade id */
@@ -127,16 +162,16 @@ contract SDC1155 is IERC1155 {
         address address_of_debitor = address_of_creditor == counterparty1Address ? counterparty2Address : counterparty1Address;
         if ( _settlementCheck(trade_id,settlement_amount) ){
             uint256 amountToTransfer = settlement_amount - refTradeSpecs[trade_id].marginBuffer;
-            _performTransfer(address_of_debitor, address(this), BUFFER, MARGIN, amountToTransfer); // autodebit
-            _performTransfer(address(this), address_of_creditor, MARGIN, BUFFER, amountToTransfer); // autocredit
-            emit TradeSettlementSuccessful(block.timestamp);
+            if (_marginCheck(address_of_debitor, trade_id) ){
+                _performTransfer(address_of_debitor, address(this), BUFFER, MARGIN, amountToTransfer); // autodebit
+                _performTransfer(address(this), address_of_creditor, MARGIN, BUFFER, amountToTransfer); // autocredit
+                emit TradeSettlementSuccessful(trade_id, block.timestamp);
+                return true;
+            }
         }
-        else{
-            _performTermination(trade_id);
-            emit TradeTerminated(block.timestamp);
-        }
-        
-        return true;
+        _performTermination(trade_id);
+        emit TradeTerminated(trade_id, address_of_debitor, block.timestamp);
+        return false;
     }
 
     /*@notice: SDC - Internal function to perform termination */
@@ -145,8 +180,11 @@ contract SDC1155 is IERC1155 {
     }
 
     /*@notice: SDC - Check Margin */
-    function _marginCheck(string memory trade_id) private pure returns(bool){
-        return true;
+    function _marginCheck(address cpAddress, string memory trade_id) private view returns(bool){
+        if ( balances[BUFFER][cpAddress] >= refTradeSpecs[trade_id].marginBuffer )
+            return true;
+        else
+            return false;
     }
 
     /*@notice: SDC - Check Settlement */
