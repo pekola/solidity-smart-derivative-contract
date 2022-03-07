@@ -67,7 +67,7 @@ contract SDC {
 
     function inceptTrade(string memory fpml_data, address fixPayerPartyAddress) external onlyCounterparty returns(string memory){ 
         uint256 timestamp = block.timestamp;
-        string memory trade_id = string(abi.encodePacked("trade_ref_",timestamp));
+        string memory trade_id = string(abi.encodePacked(fpml_data));
         refTradeSpecs[trade_id] = RefTradeSpec(timestamp,fpml_data,TradeStatus.INCEPTED,fixPayerPartyAddress,msg.sender);
         emit TradeIncepted(trade_id,timestamp);
         return trade_id;
