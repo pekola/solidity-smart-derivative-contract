@@ -71,7 +71,7 @@ describe("SDC functionaly as ERC1155 Token", () => {
     id_array.push(trade_id);
     let margin_array = [];
     margin_array.push(10);
-    const settle_call = await sdc1155.connect(valuationProvider).settle_with_amounts(id_array,margin_array);
+    const settle_call = await sdc1155.connect(valuationProvider).settle(id_array,margin_array);
     await expect(settle_call).to.emit(sdc1155, "TradeSettlementSuccessful");
   });
 
