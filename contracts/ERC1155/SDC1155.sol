@@ -19,7 +19,7 @@ contract SDC1155 is IERC1155 {
     enum TradeStatus{ INCEPTED, CONFIRMED, ACTIVE, TERMINATION_REQUESTED, TERMINATION_CONFIRMED, DEAD }
 
     string private sdc_id;
-    // SDC need three addresses as token minting and burning is executed by a central authority
+    // SDC need four addresses as token minting and burning is executed by a central authority and valuation provided by an external service
     address private counterparty1Address;
     address private counterparty2Address;
     address private tokenManagerAddress;
@@ -35,7 +35,7 @@ contract SDC1155 is IERC1155 {
         address addressStatusUpdate;    // this is the adress which has initiated a certain trade status update which needs to be confirmed - i.e. INCEPTION or TERMINATION
     }
 
-    // Holds all reference trades
+    // Hold all reference trades data
     mapping(bytes32 => RefTradeSpec) refTradeSpecs;
     string[] private   fpmlData;
 
@@ -43,7 +43,7 @@ contract SDC1155 is IERC1155 {
     mapping(uint256 => mapping(address => uint256)) private balances;
     mapping(address => mapping(address => bool))    private operatorApprovals;
 
-    // Trade Events
+    // SDC Trade Events
     event TradeIncepted(address fromAddress, bytes32 id);
     event TradeConfirmed(address fromAddress, bytes32 id);
     event TradeActive(bytes32 id);
@@ -53,7 +53,11 @@ contract SDC1155 is IERC1155 {
     event TerminationRequested(address fromAddress, bytes32 trade_id);
     event TerminationConfirmed(address fromAddress, bytes32 trade_id);
 
-    // Modifiers
+    // Transfer Events
+    event DepositRequested();
+    event WithdrawalRequested();
+
+    // Modifiers to control access to external functions below
     modifier onlyCounterparty { 
         require(msg.sender == counterparty1Address || msg.sender == counterparty2Address, "Not authorised"); _;
     }
@@ -68,6 +72,7 @@ contract SDC1155 is IERC1155 {
         _;
     }
     
+    /*@notice: constructor */
     constructor(string memory _sdc_id, 
                 address _counterparty1Adress, 
                 address _counterparty2Adress, 
@@ -80,10 +85,21 @@ contract SDC1155 is IERC1155 {
       valuationProviderAddress = _valuationProviderAdress;
     }
     
+    ////// SECTION: EXTERNAL GETTER FUNCTIONS /////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+
     function    getTradeRef(bytes32 id)   external view returns (string memory fpml_data, address addressPayerSwap, TradeStatus status){
         uint data_index = refTradeSpecs[id].fpml_index;
         return (fpmlData[data_index], refTradeSpecs[id].addressPayerSwap, refTradeSpecs[id].tradeStatus);
     }
+
+     /*@notice: SDC - Communication with Oracle - External function to return fpml array  */
+    function getFPMLData() external onlyValuationProvider view  returns (string[] memory) {
+        return fpmlData;
+    }
+
+    
+    ////// SECTION: EXTERNAL SDC LIVE CYCLE FUNCTIONS (to be called from authorised addresses only) ////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+
 
     /*@notice: External Function to Incept a Trade with FPML data and margin and buffer amounts */
     function inceptTrade(string memory fpml_data, address payerSwapAddress, uint256 terminationFee, uint256 marginBuffer) external onlyCounterparty returns(bool){ 
@@ -110,20 +126,14 @@ contract SDC1155 is IERC1155 {
         return isConfirmed;
     }
 
-    /*@notice: SDC - Communication with Oracle - External function to return fpml array  */
-    function getFPMLData() external onlyValuationProvider view  returns (string[] memory) {
-        return fpmlData;
-    }
-
-   
     /* @notice: SDC - External Function to trigger a settlement for all active trades only triggered by a counterparty */
-    function settle() external onlyCounterparty { 
+    function requestSettlement() external onlyCounterparty { 
         emit ValuationRequest();
     }
 
     
     /*@notice: SDC - Externalö Function to trigger a settlement with already know settlement amounts called by e.g. an external oracle service */
-    function settle_with_amounts(bytes32[] memory trade_ids, int[] memory _marginAmounts ) external onlyValuationProvider returns(bool)  { 
+    function settle(bytes32[] memory trade_ids, int[] memory _marginAmounts ) external onlyValuationProvider returns(bool)  { 
         for (uint i=0; i< trade_ids.length; i++){
             require(refTradeSpecs[trade_ids[i]].addressPayerSwap != address(0x0),"settle: trade id not defined");
             address creditor_address; 
@@ -161,6 +171,22 @@ contract SDC1155 is IERC1155 {
         return true;
     }
 
+    ////// SECTION: SDC INTERNAL FUNCTIONALITY FOR SETTLEMENT AND TERMINATION /////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+    
+    /*@notice: SDC - Check Margin */
+    function _marginCheck(address cpAddress, bytes32 trade_id) internal view returns(bool){
+        if ( balances[CASH_BUFFER][cpAddress] >= refTradeSpecs[trade_id].marginBuffer )
+            return true;
+        else
+            return false;
+    }
+
+    /*@notice: SDC - Check Settlement */
+    function _settlementCheck(bytes32 trade_id, uint256 amount) internal view returns(bool){
+        if ( refTradeSpecs[trade_id].marginBuffer >= amount) return true;
+        else return false;
+    }
+
      /*@notice: SDC - Internal function to perform a settlement transfer for specific trade id */
     function _performSettlementTransfer(bytes32 trade_id, uint256 settlement_amount, address address_of_creditor ) private returns(bool){
         require(settlement_amount > 0, "Settlement amount should be positive");
@@ -176,8 +202,8 @@ contract SDC1155 is IERC1155 {
             }
         }
        
-//        _performTermination(trade_id,address_of_debitor);
-//        emit TradeTerminated(trade_id, address_of_debitor);
+        _performTermination(trade_id,address_of_debitor);
+        emit TradeTerminated(trade_id, address_of_debitor);
         return false;
     }
 
@@ -202,34 +228,25 @@ contract SDC1155 is IERC1155 {
         return true;       
     }
 
-    /*@notice: SDC - Check Margin */
-    function _marginCheck(address cpAddress, bytes32 trade_id) private view returns(bool){
-        if ( balances[CASH_BUFFER][cpAddress] >= refTradeSpecs[trade_id].marginBuffer )
-            return true;
-        else
-            return false;
-    }
+    
+    ////// SECTION: TOKEN TRANSFER FUNCTIONALITY /////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+ 
 
-    /*@notice: SDC - Check Settlement */
-    function _settlementCheck(bytes32 trade_id, uint256 amount) private view returns(bool){
-        if ( refTradeSpecs[trade_id].marginBuffer >= amount) return true;
-        else return false;
-    }
-
-    /* @notice: SDC - Mints Buffer Token - Only be called from a counterparty*/
+    /* @notice: Counterparty to trigger a deposit request to margin account*/
     function depositRequest(uint256 amount) external virtual onlyCounterparty {
         balances[TO_DEPOSIT][msg.sender] += amount;
-        emit TransferSingle(msg.sender,msg.sender, msg.sender, TO_DEPOSIT   , amount);
+        emit DepositRequested();
     }
 
-    /* @notice: SDC - Burns Buffer Token - Only be called from a counterparty*/
+    /* @notice: Counterparty to trigger a withdraw request to margin account*/
     function withdrawRequest(uint256 amount) external virtual onlyCounterparty {
         require(balances[CASH_BUFFER  ][msg.sender] >= amount, "withdrawRequest: Not sufficient balance!");
         balances[CASH_BUFFER  ][msg.sender] -= amount;
         balances[TO_WITHDRAW][msg.sender] += amount;
-        emit TransferSingle(msg.sender,msg.sender, msg.sender, CASH_BUFFER  , amount);
+        emit WithdrawalRequested();
     }
 
+    /* @notice: Function for token manager to manage deposit and withdrawal requests and allocate according liquidity*/
     function allocateLiquidity() external virtual onlyTokenManager {
         balances[TO_WITHDRAW  ][counterparty1Address] = 0;  // burn
         balances[TO_WITHDRAW  ][counterparty2Address] = 0;  // burn
@@ -237,54 +254,6 @@ contract SDC1155 is IERC1155 {
         uint amountToDepositCP2 = balances[TO_DEPOSIT  ][counterparty2Address];
         _performTransfer(counterparty1Address, counterparty1Address, TO_DEPOSIT, CASH_BUFFER,amountToDepositCP1); // allocate to buffer
         _performTransfer(counterparty2Address, counterparty2Address, TO_DEPOSIT, CASH_BUFFER,amountToDepositCP2); // allocate to buffer
-    }
-
-   
-    /*@notice: IERC1155 - Get the balance of an account's Tokens. */
-    function balanceOf(address account, uint _id)  external view override returns (uint256){
-        require(_id <= 4, "balanceOf: only four token types defined!");
-        require(account != address(0x0), "balanceOf: balance query for the zero address");
-        return balances[_id][account];
-    }
-
-    /*@notice: IERC1155 - Get the balance of multiple account/token pairs*/
-    function balanceOfBatch(address[] memory accounts, uint[] memory ids) external view override returns (uint256[] memory){
-        require(accounts.length == ids.length, "balanceOfBatch: accounts and ids length mismatch");
-        uint256[] memory batchBalances = new uint256[](accounts.length);
-        for (uint256 i = 0; i < accounts.length; ++i) {
-            batchBalances[i] = this.balanceOf(accounts[i], ids[i]);
-        }
-        return batchBalances;
-    }
-
-    /*  @notice: IERC1155 - Transfers `_value` amount of an `_id` from the `_from` address to the `_to` address specified (with safety call). */
-    function safeTransferFrom(address from, address to, uint256 id, uint256 amount, bytes memory data) external override{
-        require(msg.sender==address(this),"Not authorised");  // cannot be called from other external address
-        _performTransfer(from,to,id,id,amount);
-
-    }
-
-    /* @notice: IERC1155 - Transfers `_values` amount(s) of `_ids` from the `_from` address to the `_to` address specified (with safety call). */
-    function safeBatchTransferFrom(address from, address to, uint256[] calldata ids, uint256[] calldata amounts, bytes memory data) external override{
-        require(msg.sender==address(this),"Not authorised");  // cannot be called from other external address
-        _performBatchTransfer(from,to,ids,ids,amounts);
-
-    }
-
-    
-    /*@notice: IERC1155 - Enable or disable approval for a third party ("operator") to manage all of the caller's tokens.*/
-    function setApprovalForAll(address operator, bool isApproved) external override {
-        require(operator != address(0x0), "setApprovalForAll: operator is zero address");
-        address owner = msg.sender;
-        operatorApprovals[owner][operator] = isApproved;
-        emit ApprovalForAll(owner, operator, isApproved);
-    }
-
-    /*@notice: IERC1155 - Queries the approval status of an operator for a given owner.*/
-    function isApprovedForAll(address owner, address operator) external view override returns (bool)  {
-        require(owner != address(0x0), "isApprovedForAll: owner is zero address");
-        require(operator != address(0x0), "isApprovedForAll: operator is zero address");
-        return operatorApprovals[owner][operator];
     }
 
     /*@notice: Internal function to perform a cross token transfer */
@@ -315,13 +284,58 @@ contract SDC1155 is IERC1155 {
 
     }
 
+    ////// SECTION: IERC1155 INTERFACE IMPLEMENTATIONS /////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+   
+    /*@notice: IERC1155-Impl - Get the balance of an account's Tokens. */
+    function balanceOf(address account, uint _id)  external view override returns (uint256){
+        require(_id <= 5, "balanceOf: only five token types defined!");
+        require(account != address(0x0), "balanceOf: balance query for the zero address");
+        return balances[_id][account];
+    }
+
+    /*@notice: IERC1155-Impl - Get the balance of multiple account/token pairs*/
+    function balanceOfBatch(address[] memory accounts, uint[] memory ids) external view override returns (uint256[] memory){
+        require(accounts.length == ids.length, "balanceOfBatch: accounts and ids length mismatch");
+        uint256[] memory batchBalances = new uint256[](accounts.length);
+        for (uint256 i = 0; i < accounts.length; ++i) {
+            batchBalances[i] = this.balanceOf(accounts[i], ids[i]);
+        }
+        return batchBalances;
+    }
+
+    /*  @notice: IERC1155-Impl - Transfers `_value` amount of an `_id` from the `_from` address to the `_to` address specified (with safety call). */
+    function safeTransferFrom(address from, address to, uint256 id, uint256 amount, bytes memory data) external override{
+        require(msg.sender==address(this),"Not authorised");  // cannot be called from other external address
+        _performTransfer(from,to,id,id,amount);
+
+    }
+
+    /* @notice: IERC1155-Impl - Transfers `_values` amount(s) of `_ids` from the `_from` address to the `_to` address specified (with safety call). */
+    function safeBatchTransferFrom(address from, address to, uint256[] calldata ids, uint256[] calldata amounts, bytes memory data) external override{
+        require(msg.sender==address(this),"Not authorised");  // cannot be called from other external address
+        _performBatchTransfer(from,to,ids,ids,amounts);
+
+    }
+    
+    /*@notice: IERC1155-Impl - Enable or disable approval for a third party ("operator") to manage all of the caller's tokens.*/
+    function setApprovalForAll(address operator, bool isApproved) external override {
+        require(operator != address(0x0), "setApprovalForAll: operator is zero address");
+        address owner = msg.sender;
+        operatorApprovals[owner][operator] = isApproved;
+        emit ApprovalForAll(owner, operator, isApproved);
+    }
+
+    /*@notice: IERC1155-Impl - Queries the approval status of an operator for a given owner.*/
+    function isApprovedForAll(address owner, address operator) external view override returns (bool)  {
+        require(owner != address(0x0), "isApprovedForAll: owner is zero address");
+        require(operator != address(0x0), "isApprovedForAll: operator is zero address");
+        return operatorApprovals[owner][operator];
+    }
+
     
     /*@notice: Some support interface implementation..to be explored further*/
     function supportsInterface(bytes4 interfaceId) public view virtual override returns (bool) {
         return interfaceId == type(IERC1155).interfaceId;
     }
-
-
-
     
 }
